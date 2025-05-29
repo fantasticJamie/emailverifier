@@ -91,11 +91,14 @@ def get_mx_records(domain):
         return None
 
 def has_valid_mx_record(domain):
-    """Check if domain has valid MX records using multiple methods"""
+    """Check if domain has valid MX records using multiple methods with strict validation"""
     try:
         import socket
         import subprocess
         import platform
+        
+        mx_found = False
+        mx_message = ""
         
         # Method 1: Try proper DNS MX lookup first
         try:
@@ -107,7 +110,8 @@ def has_valid_mx_record(domain):
                 if ('mail exchanger' in output and 
                     'non-existent domain' not in output and 
                     'nxdomain' not in output):
-                    return True, "MX record found via DNS lookup"
+                    mx_found = True
+                    mx_message = "MX record found via DNS lookup"
                     
             else:
                 result = subprocess.run(['dig', '+short', 'MX', domain], 
@@ -117,31 +121,44 @@ def has_valid_mx_record(domain):
                     mx_records = result.stdout.strip().split('\n')
                     valid_mx = [mx for mx in mx_records if mx.strip() and not mx.startswith(';')]
                     if valid_mx:
-                        return True, f"MX record found: {valid_mx[0].split()[-1] if valid_mx[0].split() else 'unknown'}"
+                        mx_found = True
+                        mx_server = valid_mx[0].split()[-1] if valid_mx[0].split() else 'unknown'
+                        mx_message = f"MX record found: {mx_server}"
                         
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
             pass
         
-        # Method 2: Try Python socket approach for MX-like records
+        # If we found MX records, return success
+        if mx_found:
+            return True, mx_message
+        
+        # Method 2: Check if domain itself accepts mail on ports 25 or 587
+        def test_mail_ports(hostname):
+            """Test both port 25 (SMTP) and port 587 (submission) for mail services"""
+            ports = [25, 587]
+            for port in ports:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    result = sock.connect_ex((hostname, port))
+                    sock.close()
+                    
+                    if result == 0:
+                        return True, f"Mail service detected on {hostname}:{port}"
+                except Exception:
+                    continue
+            return False, None
+        
+        # Test the domain itself
         try:
-            # Some domains use the domain itself for mail (implicit MX)
             socket.gethostbyname(domain)
-            
-            # If domain resolves, try to connect to port 25 to check for mail service
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            result = sock.connect_ex((domain, 25))
-            sock.close()
-            
-            if result == 0:
-                return True, f"Mail service detected on domain: {domain}"
-                
+            mail_accessible, mail_msg = test_mail_ports(domain)
+            if mail_accessible:
+                return True, mail_msg
         except socket.gaierror:
             pass
-        except Exception:
-            pass
         
-        # Method 3: Check common mail server patterns
+        # Method 3: Check common mail server patterns with port testing
         common_mx_patterns = [
             f"mail.{domain}",
             f"mx.{domain}",
@@ -155,38 +172,36 @@ def has_valid_mx_record(domain):
             try:
                 socket.gethostbyname(mx_candidate)
                 
-                # Try to connect to verify it's actually a mail server
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                result = sock.connect_ex((mx_candidate, 25))
-                sock.close()
-                
-                if result == 0:
-                    return True, f"Mail server found and verified: {mx_candidate}"
-                else:
-                    # Mail server hostname exists, likely has mail services
-                    return True, f"Mail server hostname found: {mx_candidate}"
+                # Test both ports 25 and 587
+                mail_accessible, mail_msg = test_mail_ports(mx_candidate)
+                if mail_accessible:
+                    return True, mail_msg
                     
             except socket.gaierror:
                 continue
             except Exception:
                 continue
         
-        # Method 4: Last resort - if domain exists and no obvious blocking, assume mail possible
-        # This is more lenient for domains that might have mail configured in non-standard ways
-        try:
-            socket.gethostbyname(domain)
-            # If we can resolve the domain but found no obvious mail servers,
-            # we'll be cautiously optimistic since many domains have mail configured
-            # in ways our simple checks might miss
-            return True, f"Domain resolves - mail services may be available (limited verification)"
-        except socket.gaierror:
-            pass
+        # Method 4: More strict fallback - only accept if we have some evidence of mail services
+        # Check if any mail-related subdomain exists (but don't assume mail works)
+        mail_subdomains_found = []
+        for mx_candidate in common_mx_patterns:
+            try:
+                socket.gethostbyname(mx_candidate)
+                mail_subdomains_found.append(mx_candidate)
+            except socket.gaierror:
+                continue
         
-        return False, f"No mail services found for domain: {domain}"
+        if mail_subdomains_found:
+            # Found mail-related hostnames but couldn't connect to mail ports
+            # This suggests the domain might have mail services but they're not accessible
+            return False, f"Mail hostnames found ({', '.join(mail_subdomains_found[:2])}) but no accessible mail services"
+        
+        # If we get here, no evidence of mail services found
+        return False, f"No mail services detected for domain: {domain}"
         
     except Exception as e:
-        return False, f"MX record lookup failed: {str(e)}"
+        return False, f"Mail service verification failed: {str(e)}"
 
 def validate_email_comprehensive(email: str):
     """Comprehensive email validation using proper DNS MX record checking"""
