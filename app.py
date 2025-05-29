@@ -407,7 +407,7 @@ def index():
         
         <div class="powered-by">
             🚀 <strong>Hosted on Vercel</strong> • 🐍 <strong>Python Flask Backend</strong><br>
-            ✅ Format validation • 🌐 DNS lookup • 📧 SMTP verification • 🚫 Disposable email detection
+            ✅ Format validation • 🌐 DNS lookup • 📧 Mail server verification • 🚫 Disposable email detection
         </div>
         
         <div class="github-link">
@@ -417,32 +417,17 @@ def index():
         </div>
         
         <input type="email" id="emailInput" placeholder="Enter email address (e.g., contact@company.com)" autofocus>
-        
-        <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 10px; border-left: 4px solid #17a2b8;">
-            <h4 style="margin: 0 0 10px 0; color: #333;">🔧 Validation Level:</h4>
-            <label style="display: block; margin-bottom: 8px; cursor: pointer;">
-                <input type="radio" name="validationLevel" value="basic" checked style="margin-right: 8px;">
-                <strong>Basic</strong> - Format + DNS + Mail server check (faster, serverless-friendly)
-            </label>
-            <label style="display: block; cursor: pointer;">
-                <input type="radio" name="validationLevel" value="advanced" style="margin-right: 8px;">
-                <strong>Advanced</strong> - Full SMTP mailbox verification (slower, more accurate)
-            </label>
-        </div>
-        
         <button onclick="validateEmail()" id="validateBtn">🔍 Validate Email Address</button>
         
         <div id="result" class="result"></div>
         
         <div class="api-info">
             <h4>🔧 API Endpoint:</h4>
-            <p>POST <code>/api/validate</code> with JSON:</p>
-            <p><code>{"email": "test@example.com", "validation_level": "basic"}</code></p>
-            <p><code>{"email": "test@example.com", "validation_level": "advanced"}</code></p>
+            <p>POST <code>/api/validate</code> with JSON: <code>{"email": "test@example.com"}</code></p>
         </div>
         
         <div class="footer">
-            <p>💡 <strong>Tip:</strong> This validator now performs actual SMTP mailbox verification</p>
+            <p>💡 <strong>Tip:</strong> Comprehensive validation with smart mail server detection</p>
             <p>🔒 No data is stored • ⚡ Fast global edge network • 🆓 Free to use</p>
         </div>
     </div>
@@ -453,9 +438,6 @@ def index():
             const btn = document.getElementById('validateBtn');
             const result = document.getElementById('result');
             
-            // Get selected validation level
-            const validationLevel = document.querySelector('input[name="validationLevel"]:checked').value;
-            
             if (!email) {
                 showResult('❌ Please enter an email address', 'invalid');
                 return;
@@ -463,21 +445,13 @@ def index():
             
             btn.disabled = true;
             btn.innerHTML = '<div class="loading"></div>Validating...';
-            
-            if (validationLevel === 'advanced') {
-                showResult('🐍 Python is checking your email...<br>📡 Checking DNS records...<br>🌐 Verifying domain...<br>📧 Testing SMTP connection...<br>🔍 Verifying mailbox exists...', 'checking');
-            } else {
-                showResult('🐍 Python is checking your email...<br>📡 Checking DNS records...<br>🌐 Verifying domain...<br>📧 Testing mail server...', 'checking');
-            }
+            showResult('🐍 Comprehensive email validation in progress...<br>📧 Checking format, domain, and mail services...', 'checking');
             
             try {
                 const response = await fetch('/api/validate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        email: email,
-                        validation_level: validationLevel
-                    })
+                    body: JSON.stringify({email: email})
                 });
                 
                 const data = await response.json();
@@ -517,13 +491,12 @@ def index():
 
 @app.route('/api/validate', methods=['POST'])
 def validate_api():
-    """API endpoint for email validation"""
+    """API endpoint for comprehensive email validation"""
     try:
         data = request.get_json()
         email = data.get('email', '').strip()
-        validation_level = data.get('validation_level', 'basic')  # Get validation level from request
         
-        result = {'email': email, 'valid': False, 'messages': [], 'validation_level': validation_level}
+        result = {'email': email, 'valid': False, 'messages': []}
         
         if not email:
             result['messages'].append('❌ Please enter an email address')
@@ -540,32 +513,23 @@ def validate_api():
         
         # Step 2: Disposable email check
         if is_disposable_email(domain):
-            result['messages'].append('⚠️ Disposable email detected - not suitable for business')
+            result['messages'].append('⚠️ Disposable email detected - not recommended for business use')
             return jsonify(result)
         
         # Step 3: Domain validation
         domain_valid, domain_msg = validate_email_domain(email)
-        result['messages'].append(f'📡 {domain_msg}')
+        result['messages'].append(f'🌐 {domain_msg}')
         
         if not domain_valid:
             return jsonify(result)
         
-        # Step 4: SMTP validation based on user choice
-        if validation_level == 'advanced':
-            result['messages'].append('🔍 Performing advanced SMTP mailbox verification...')
-            smtp_valid, smtp_msg = validate_email_smtp_improved(email)
-        else:
-            result['messages'].append('📧 Performing basic mail server verification...')
-            smtp_valid, smtp_msg = validate_email_smtp_basic_fixed(email)
-            
-        result['messages'].append(f'📧 {smtp_msg}')
+        # Step 4: Comprehensive email validation
+        smtp_valid, smtp_msg = validate_email_comprehensive(email)
+        result['messages'].append(f'{smtp_msg}')
         
         if smtp_valid:
             result['valid'] = True
-            if validation_level == 'advanced':
-                result['messages'].append('🎉 Email verified - mailbox exists and can receive mail!')
-            else:
-                result['messages'].append('🎉 Email appears to be valid!')
+            result['messages'].append('🎉 Email validation successful!')
         
         return jsonify(result)
         
