@@ -178,6 +178,8 @@ def validate_email_smtp_basic_fixed(email: str):
         # So we'll be conservative and assume it might have mail services
         return True, f"Domain verification completed with warnings: {str(e)}"
 
+
+
 def is_disposable_email(domain: str) -> bool:
     """Check if domain is a disposable email provider"""
     disposable_domains = [
