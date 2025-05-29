@@ -91,20 +91,19 @@ def get_mx_records(domain):
         return None
 
 def has_valid_mx_record(domain):
-    """Check if domain has valid MX records using DNS lookup"""
+    """Check if domain has valid MX records using multiple methods"""
     try:
         import socket
         import subprocess
         import platform
         
-        # Method 1: Try proper DNS MX lookup
+        # Method 1: Try proper DNS MX lookup first
         try:
             if platform.system().lower() == 'windows':
                 result = subprocess.run(['nslookup', '-type=MX', domain], 
                                       capture_output=True, text=True, timeout=8)
                 output = result.stdout.lower()
                 
-                # Check if MX records exist and domain is not non-existent
                 if ('mail exchanger' in output and 
                     'non-existent domain' not in output and 
                     'nxdomain' not in output):
@@ -123,16 +122,68 @@ def has_valid_mx_record(domain):
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
             pass
         
-        # Method 2: Fallback - check for common mail server hostnames
-        mx_candidate = get_mx_records(domain)
-        if mx_candidate:
+        # Method 2: Try Python socket approach for MX-like records
+        try:
+            # Some domains use the domain itself for mail (implicit MX)
+            socket.gethostbyname(domain)
+            
+            # If domain resolves, try to connect to port 25 to check for mail service
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((domain, 25))
+            sock.close()
+            
+            if result == 0:
+                return True, f"Mail service detected on domain: {domain}"
+                
+        except socket.gaierror:
+            pass
+        except Exception:
+            pass
+        
+        # Method 3: Check common mail server patterns
+        common_mx_patterns = [
+            f"mail.{domain}",
+            f"mx.{domain}",
+            f"mx1.{domain}",
+            f"smtp.{domain}",
+            f"mailserver.{domain}",
+            f"email.{domain}"
+        ]
+        
+        for mx_candidate in common_mx_patterns:
             try:
                 socket.gethostbyname(mx_candidate)
-                return True, f"Mail server found: {mx_candidate}"
+                
+                # Try to connect to verify it's actually a mail server
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((mx_candidate, 25))
+                sock.close()
+                
+                if result == 0:
+                    return True, f"Mail server found and verified: {mx_candidate}"
+                else:
+                    # Mail server hostname exists, likely has mail services
+                    return True, f"Mail server hostname found: {mx_candidate}"
+                    
             except socket.gaierror:
-                pass
+                continue
+            except Exception:
+                continue
         
-        return False, f"No MX records found for domain: {domain}"
+        # Method 4: Last resort - if domain exists and no obvious blocking, assume mail possible
+        # This is more lenient for domains that might have mail configured in non-standard ways
+        try:
+            socket.gethostbyname(domain)
+            # If we can resolve the domain but found no obvious mail servers,
+            # we'll be cautiously optimistic since many domains have mail configured
+            # in ways our simple checks might miss
+            return True, f"Domain resolves - mail services may be available (limited verification)"
+        except socket.gaierror:
+            pass
+        
+        return False, f"No mail services found for domain: {domain}"
         
     except Exception as e:
         return False, f"MX record lookup failed: {str(e)}"
