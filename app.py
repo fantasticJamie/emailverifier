@@ -23,45 +23,125 @@ def validate_email_domain(email: str):
         return False, f"Domain check error: {str(e)}"
 
 def get_mx_records(domain):
-    """Get MX records for a domain using DNS lookup with better validation"""
+    """Get actual MX records for a domain using proper DNS lookup"""
     try:
         import socket
+        import subprocess
+        import platform
         
-        # First, try to get actual MX records using a more thorough approach
-        mail_servers_found = []
+        # Try to get MX records using nslookup/dig
+        try:
+            if platform.system().lower() == 'windows':
+                # Use nslookup on Windows
+                result = subprocess.run(['nslookup', '-type=MX', domain], 
+                                      capture_output=True, text=True, timeout=10)
+                output = result.stdout.lower()
+                
+                if 'mail exchanger' in output and 'non-existent domain' not in output:
+                    # Extract MX record - basic parsing
+                    lines = output.split('\n')
+                    for line in lines:
+                        if 'mail exchanger' in line and '=' in line:
+                            mx_host = line.split('=')[-1].strip().rstrip('.')
+                            if mx_host and mx_host != domain:
+                                return mx_host
+                            
+            else:
+                # Use dig on Linux/Mac
+                result = subprocess.run(['dig', '+short', 'MX', domain], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if line.strip():
+                            # MX record format: "10 mail.example.com."
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                mx_host = parts[-1].rstrip('.')
+                                if mx_host and mx_host != domain:
+                                    return mx_host
+                                    
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
+            pass
         
-        # Common mail server prefixes to try
-        mail_prefixes = [
+        # Fallback: Try common mail server patterns
+        common_mx_patterns = [
             f"mail.{domain}",
-            f"smtp.{domain}", 
             f"mx.{domain}",
             f"mx1.{domain}",
-            f"aspmx.l.google.com" if domain in ['gmail.com', 'googlemail.com'] else None,
-            domain  # Sometimes the domain itself handles mail
+            f"smtp.{domain}",
+            f"aspmx.l.google.com" if 'google' in domain else None,
+            f"outlook-com.olc.protection.outlook.com" if 'outlook' in domain or 'hotmail' in domain else None
         ]
         
         # Filter out None values
-        mail_prefixes = [prefix for prefix in mail_prefixes if prefix]
+        common_mx_patterns = [pattern for pattern in common_mx_patterns if pattern]
         
-        for mail_server in mail_prefixes:
+        for mx_candidate in common_mx_patterns:
             try:
-                # Check if the mail server hostname resolves
-                socket.gethostbyname(mail_server)
-                mail_servers_found.append(mail_server)
+                socket.gethostbyname(mx_candidate)
+                return mx_candidate
             except socket.gaierror:
                 continue
-        
-        # Return the first working mail server found
-        return mail_servers_found[0] if mail_servers_found else None
+                
+        return None
         
     except Exception:
         return None
 
+def has_valid_mx_record(domain):
+    """Check if domain has valid MX records using DNS lookup"""
+    try:
+        import socket
+        import subprocess
+        import platform
+        
+        # Method 1: Try proper DNS MX lookup
+        try:
+            if platform.system().lower() == 'windows':
+                result = subprocess.run(['nslookup', '-type=MX', domain], 
+                                      capture_output=True, text=True, timeout=8)
+                output = result.stdout.lower()
+                
+                # Check if MX records exist and domain is not non-existent
+                if ('mail exchanger' in output and 
+                    'non-existent domain' not in output and 
+                    'nxdomain' not in output):
+                    return True, "MX record found via DNS lookup"
+                    
+            else:
+                result = subprocess.run(['dig', '+short', 'MX', domain], 
+                                      capture_output=True, text=True, timeout=8)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    mx_records = result.stdout.strip().split('\n')
+                    valid_mx = [mx for mx in mx_records if mx.strip() and not mx.startswith(';')]
+                    if valid_mx:
+                        return True, f"MX record found: {valid_mx[0].split()[-1] if valid_mx[0].split() else 'unknown'}"
+                        
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
+            pass
+        
+        # Method 2: Fallback - check for common mail server hostnames
+        mx_candidate = get_mx_records(domain)
+        if mx_candidate:
+            try:
+                socket.gethostbyname(mx_candidate)
+                return True, f"Mail server found: {mx_candidate}"
+            except socket.gaierror:
+                pass
+        
+        return False, f"No MX records found for domain: {domain}"
+        
+    except Exception as e:
+        return False, f"MX record lookup failed: {str(e)}"
+
 def validate_email_comprehensive(email: str):
-    """Balanced email validation that reduces false positives while staying practical"""
+    """Comprehensive email validation using proper DNS MX record checking"""
     domain = email.split('@')[1]
     
-    # Expanded list of known good domains that we can trust
+    # List of known good domains that we can trust (skip MX lookup for speed)
     trusted_domains = [
         'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 
         'yahoo.com', 'apple.com', 'icloud.com', 'microsoft.com',
@@ -74,45 +154,26 @@ def validate_email_comprehensive(email: str):
     if domain.lower() in trusted_domains:
         return True, f"✅ Verified trusted email provider: {domain}"
     
-    # For other domains, be more careful to avoid false positives
+    # For other domains, check MX records properly
     try:
-        # Step 1: Check if domain has mail servers configured
-        mail_server = get_mx_records(domain)
-        
-        if not mail_server:
-            return False, f"❌ No mail server found for domain: {domain}"
-        
-        # Step 2: For non-trusted domains, be more strict about verification
-        # Check if it's a suspicious or likely invalid domain pattern
+        # Check for suspicious patterns first
         if len(domain.split('.')) < 2:
             return False, f"❌ Invalid domain format: {domain}"
             
         # Check for obviously fake patterns
-        suspicious_patterns = ['test', 'example', 'fake', 'invalid', 'temp', 'dummy']
+        suspicious_patterns = ['test', 'example', 'fake', 'invalid', 'temp', 'dummy', 'localhost']
         if any(pattern in domain.lower() for pattern in suspicious_patterns):
             return False, f"❌ Domain appears to be a test/fake domain: {domain}"
         
-        # Try to connect to mail server for verification
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(6)
-            result = sock.connect_ex((mail_server, 25))
-            sock.close()
-            
-            if result == 0:
-                return True, f"✅ Mail server verified and accessible: {mail_server}"
-            else:
-                # For unknown domains, if we can't connect to port 25, be more conservative
-                # but still allow if the mail server hostname exists
-                return True, f"⚠️ Mail server found but connection limited: {mail_server} (may have mail services)"
-                
-        except Exception as e:
-            # If mail server hostname exists but connection fails, be cautious but not too strict
-            return True, f"⚠️ Mail server detected: {mail_server} (connection verification limited)"
+        # Proper MX record check
+        has_mx, mx_msg = has_valid_mx_record(domain)
+        
+        if has_mx:
+            return True, f"✅ {mx_msg}"
+        else:
+            return False, f"❌ {mx_msg}"
             
     except Exception as e:
-        # For unknown errors, be more conservative
         return False, f"❌ Email validation failed: {str(e)}"
 
 def is_disposable_email(domain: str) -> bool:
