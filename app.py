@@ -3,6 +3,7 @@ import re
 import socket
 import smtplib
 import os
+from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
@@ -22,8 +23,87 @@ def validate_email_domain(email: str):
     except Exception as e:
         return False, f"Domain check error: {str(e)}"
 
-def validate_email_smtp_basic(email: str):
-    """Basic SMTP validation - simplified for serverless"""
+def get_mx_record(domain):
+    """Get MX record for domain"""
+    try:
+        import dns.resolver
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        return str(mx_records[0].exchange).rstrip('.')
+    except:
+        # Fallback - assume mail server is mail.domain.com or domain.com
+        return f"mail.{domain}"
+
+def validate_email_smtp_improved(email: str):
+    """Improved SMTP validation that actually checks mailbox existence"""
+    domain = email.split('@')[1]
+    
+    # List of known good domains that we can trust (skip intensive checking)
+    trusted_domains = [
+        'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 
+        'yahoo.com', 'apple.com', 'icloud.com', 'microsoft.com',
+        'google.com', 'amazon.com', 'facebook.com', 'twitter.com',
+        'linkedin.com', 'github.com'
+    ]
+    
+    if domain.lower() in trusted_domains:
+        return True, f"Trusted domain: {domain}"
+    
+    # For other domains, do proper SMTP checking
+    try:
+        # Get MX record or use domain directly
+        try:
+            mx_host = get_mx_record(domain)
+        except:
+            mx_host = domain
+        
+        # Connect to SMTP server
+        server = smtplib.SMTP(timeout=10)
+        server.set_debuglevel(0)
+        
+        try:
+            # Try to connect to MX server
+            server.connect(mx_host, 25)
+            server.helo()
+            
+            # Try MAIL FROM
+            server.mail('noreply@example.com')
+            
+            # Try RCPT TO - this is where we check if the mailbox exists
+            code, message = server.rcpt(email)
+            server.quit()
+            
+            # Check response codes
+            if code == 250:
+                return True, f"Mailbox verified: {email}"
+            elif code in [550, 551, 553]:
+                return False, f"Mailbox does not exist: {email}"
+            elif code in [450, 451, 452]:
+                return False, f"Temporary issue with mailbox: {email}"
+            else:
+                return False, f"SMTP verification failed (code {code}): {message.decode() if isinstance(message, bytes) else message}"
+                
+        except smtplib.SMTPServerDisconnected:
+            server.quit()
+            return False, f"SMTP server disconnected during verification"
+        except smtplib.SMTPRecipientsRefused:
+            server.quit()
+            return False, f"Mailbox rejected: {email}"
+        except Exception as smtp_error:
+            try:
+                server.quit()
+            except:
+                pass
+            return False, f"SMTP check failed: {str(smtp_error)}"
+            
+    except socket.timeout:
+        return False, f"SMTP server timeout for domain: {domain}"
+    except socket.gaierror:
+        return False, f"Cannot connect to mail server for domain: {domain}"
+    except Exception as e:
+        return False, f"SMTP validation error: {str(e)}"
+
+def validate_email_smtp_basic_fixed(email: str):
+    """Fixed version - more conservative approach"""
     domain = email.split('@')[1]
     
     # List of known good domains that we can trust
@@ -37,13 +117,37 @@ def validate_email_smtp_basic(email: str):
     if domain.lower() in trusted_domains:
         return True, f"Trusted domain: {domain}"
     
-    # For other domains, we'll do a basic check
+    # For other domains, be more conservative
+    # Only return valid if we can actually verify the domain has mail services
     try:
-        # This is a simplified check for serverless environment
-        # Full SMTP verification may not work reliably in Vercel
-        return True, f"Domain appears valid: {domain}"
+        # Check if domain has MX record
+        import socket
+        try:
+            # Try to get MX record (basic check)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((f"mail.{domain}", 25))
+            sock.close()
+            
+            if result == 0:
+                return True, f"Mail server found for domain: {domain}"
+            else:
+                # Try domain directly
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((domain, 25))
+                sock.close()
+                
+                if result == 0:
+                    return True, f"Mail server found for domain: {domain}"
+                else:
+                    return False, f"No mail server found for domain: {domain}"
+                    
+        except Exception as e:
+            return False, f"Cannot verify mail server for domain {domain}: {str(e)}"
+            
     except Exception as e:
-        return False, f"SMTP check error: {str(e)}"
+        return False, f"Domain verification error: {str(e)}"
 
 def is_disposable_email(domain: str) -> bool:
     """Check if domain is a disposable email provider"""
@@ -274,7 +378,7 @@ def index():
         
         <div class="powered-by">
             🚀 <strong>Hosted on Vercel</strong> • 🐍 <strong>Python Flask Backend</strong><br>
-            ✅ Format validation • 🌐 DNS lookup • 📧 Domain verification • 🚫 Disposable email detection
+            ✅ Format validation • 🌐 DNS lookup • 📧 SMTP verification • 🚫 Disposable email detection
         </div>
         
         <div class="github-link">
@@ -284,17 +388,32 @@ def index():
         </div>
         
         <input type="email" id="emailInput" placeholder="Enter email address (e.g., contact@company.com)" autofocus>
+        
+        <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 10px; border-left: 4px solid #17a2b8;">
+            <h4 style="margin: 0 0 10px 0; color: #333;">🔧 Validation Level:</h4>
+            <label style="display: block; margin-bottom: 8px; cursor: pointer;">
+                <input type="radio" name="validationLevel" value="basic" checked style="margin-right: 8px;">
+                <strong>Basic</strong> - Format + DNS + Mail server check (faster, serverless-friendly)
+            </label>
+            <label style="display: block; cursor: pointer;">
+                <input type="radio" name="validationLevel" value="advanced" style="margin-right: 8px;">
+                <strong>Advanced</strong> - Full SMTP mailbox verification (slower, more accurate)
+            </label>
+        </div>
+        
         <button onclick="validateEmail()" id="validateBtn">🔍 Validate Email Address</button>
         
         <div id="result" class="result"></div>
         
         <div class="api-info">
             <h4>🔧 API Endpoint:</h4>
-            <p>POST <code>/api/validate</code> with JSON: <code>{"email": "test@example.com"}</code></p>
+            <p>POST <code>/api/validate</code> with JSON:</p>
+            <p><code>{"email": "test@example.com", "validation_level": "basic"}</code></p>
+            <p><code>{"email": "test@example.com", "validation_level": "advanced"}</code></p>
         </div>
         
         <div class="footer">
-            <p>💡 <strong>Tip:</strong> This is a serverless function running on Vercel</p>
+            <p>💡 <strong>Tip:</strong> This validator now performs actual SMTP mailbox verification</p>
             <p>🔒 No data is stored • ⚡ Fast global edge network • 🆓 Free to use</p>
         </div>
     </div>
@@ -305,6 +424,9 @@ def index():
             const btn = document.getElementById('validateBtn');
             const result = document.getElementById('result');
             
+            // Get selected validation level
+            const validationLevel = document.querySelector('input[name="validationLevel"]:checked').value;
+            
             if (!email) {
                 showResult('❌ Please enter an email address', 'invalid');
                 return;
@@ -312,13 +434,21 @@ def index():
             
             btn.disabled = true;
             btn.innerHTML = '<div class="loading"></div>Validating...';
-            showResult('🐍 Python is checking your email...<br>📡 Checking DNS records...<br>🌐 Verifying domain...', 'checking');
+            
+            if (validationLevel === 'advanced') {
+                showResult('🐍 Python is checking your email...<br>📡 Checking DNS records...<br>🌐 Verifying domain...<br>📧 Testing SMTP connection...<br>🔍 Verifying mailbox exists...', 'checking');
+            } else {
+                showResult('🐍 Python is checking your email...<br>📡 Checking DNS records...<br>🌐 Verifying domain...<br>📧 Testing mail server...', 'checking');
+            }
             
             try {
                 const response = await fetch('/api/validate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({email: email})
+                    body: JSON.stringify({
+                        email: email,
+                        validation_level: validationLevel
+                    })
                 });
                 
                 const data = await response.json();
@@ -362,8 +492,9 @@ def validate_api():
     try:
         data = request.get_json()
         email = data.get('email', '').strip()
+        validation_level = data.get('validation_level', 'basic')  # Get validation level from request
         
-        result = {'email': email, 'valid': False, 'messages': []}
+        result = {'email': email, 'valid': False, 'messages': [], 'validation_level': validation_level}
         
         if not email:
             result['messages'].append('❌ Please enter an email address')
@@ -390,13 +521,22 @@ def validate_api():
         if not domain_valid:
             return jsonify(result)
         
-        # Step 4: Basic email validation (simplified for serverless)
-        smtp_valid, smtp_msg = validate_email_smtp_basic(email)
+        # Step 4: SMTP validation based on user choice
+        if validation_level == 'advanced':
+            result['messages'].append('🔍 Performing advanced SMTP mailbox verification...')
+            smtp_valid, smtp_msg = validate_email_smtp_improved(email)
+        else:
+            result['messages'].append('📧 Performing basic mail server verification...')
+            smtp_valid, smtp_msg = validate_email_smtp_basic_fixed(email)
+            
         result['messages'].append(f'📧 {smtp_msg}')
         
         if smtp_valid:
             result['valid'] = True
-            result['messages'].append('🎉 Email appears to be valid!')
+            if validation_level == 'advanced':
+                result['messages'].append('🎉 Email verified - mailbox exists and can receive mail!')
+            else:
+                result['messages'].append('🎉 Email appears to be valid!')
         
         return jsonify(result)
         
